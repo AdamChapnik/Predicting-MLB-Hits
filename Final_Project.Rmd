@@ -1,0 +1,2013 @@
+---
+title: "A New Strategy for Predicting Pitch Outcomes in MLB Games"
+author: "Adam Chapnik"
+date: "12/12/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(MASS)
+library(leaps)
+library(car)
+library(lme4)
+library(Hmisc)
+library(generalhoslem)
+library(tidyverse)
+library(broom)
+library(lattice)
+library(knitr)
+library(pROC)
+library(png)
+theme_set(theme_classic())
+
+data <- read_csv("~/Baseball Dataframe/Statcast_2017_2018.csv")
+data$description <- NULL
+data$events <- NULL
+```
+
+
+```{r eval=FALSE, include=FALSE}
+a <- read_csv("Statcast_1.csv")
+b <- read_csv("Statcast_2.csv")
+c <- read_csv("Statcast_3.csv")
+d <- read_csv("Statcast_4b.csv")
+e <- read_csv("Statcast_4b.csv")
+data <- rbind(a,b,c,d,e)
+```
+
+
+###ABSTRACT
+
+Sabermetrics, the statistical study of baseball, is a growing field. The goal in the discipline is to make baseball entirely objective in order to improve play (as well as to aid Fantasy players). A large step that the discipline is working towards is predicting pitch outcomes. This paper hopes to shed a light on better techniques for predicting the whether a batter hits the ball into fair territory during their at bat, regardless of how the fielders handle it, by making distinctions about cumulative pitch outcomes for hitters and pitchers, not just overall but also within specific areas of the strike zone, using a dataset of every pitch thrown in a regular season Major League Baseball game between 2017 and 2018. However, this data is extremely corrupted. After creating a nearly exhaustive list of possible predictors for pitch outcomes, nine increasingly nuanced logistic regression models are created using an unfortunately subjective system. Ultimately, because of the subjective process that created the models and the issues with the data, they all have very poor calibration and discrimination, but two models that utilize the new variables, one which utilizes zone specified statistics over 2017 through 2018, and one which multiplies those respective statistics for the batter and pitcher together, perform the best with two of the best calibrations, $P=0.0005795$ and $P=8.867e-7$ from Hosmer-Lemeshow tests, and two of the best discrimination abilities, with $C=0.6314$ and $C=0.6467$. Their predictive ability was still very poor, but showed that these new variables could be helpful in predicting pitch outcomes even more accurately in future studies.
+
+
+###INTRODUCTION
+
+MLB has been using a camera system since 2017 called Statcast which measures, among other things, exact pitch speeds, rotations per minute, type, and location in three dimensions at release. When predicting whether a batter would have hit a ball in hindsight, these measurements are very useful. However, when trying to predict a future pitch outcome, they are beyond consideration. Statcast also measures the top and bottom of the strike zone for each batter as well as where along the vertical and horizontal axis of the strike zone the a pitch is located. Over time, records of pitch locations that pitchers throw and batters receive can show their strength and weakness areas of the strike zone, as well as where they tend to swing or throw pitches. Batters sometimes have most of their hits somewhere other than where the majority of a pitchers pitches end up in the strike zone. This means that, for example, if a batter who has 90% of their hits in the top of the strike zone is about to face a pitcher who throws 90% of their pitches in the bottom of strikezone, the batter has low odds of hitting the ball into fair territory against this pitcher. 
+
+Records of thousands of discrete pitche locations, however, are not very useful for this kind of statistical analysis. However, pitch locations can be put into buckets, or zones, where the proportion of pitches thrown or received in a zone becomes a discrete variable. Since each batter's strike zone has a different top and bottom, I standardized the strike zones for all batters and split the strike zone into 24 discrete zones, allowing that the edges of the strike zone are often subjective, so that some of these zones straddled the legal edge of the strike zone. Another zone was also created for pitches that were no question outside of the strike zone. Here is an illustration of the zones, with the numbering. Zone 30 is not labelled, but it is anywhere outside of the labeled zones.
+
+```{r echo=FALSE}
+y = "http://tangotiger.com/images/uploads/gameday3_pitchzone.png"
+download.file(y, 'y.jpg')
+jj <- readPNG("y.jpg",native=TRUE)
+plot(0:1,0:1,type="n",ann=FALSE,axes=FALSE)
+rasterImage(jj,0,0,1,1)
+```
+
+It was also allowed that a batter and pitcher's ability can be volatile. For this reason, cumulative statistics over player's entire careers (since 2008) as well as over the 2017 and 2018 seasons were created. (If time had alotted, variables would have also been created for player statistics over the past year from the pitch in question, as well as the best 30 days, 7 days, and 3 days. This, however, was not the case).
+
+The ultimate question I was trying to answer with my analysis was, of the variables I had created, which were the most significant in predicting pitch outcomes, as well as how accurate could these models predict a pitch outcome? I created 9 different logistic regression models with the data using several different categories and combinations of variables. I had planned to use stepwise selection with AIC to create the models, but RStudio was not able to process the large amount of data. Instead, the models were created in a subjective way by doing a t-test for a single covariate logistic regression model with every variable in consideration, combining the most statistically significant variables, and then deleting the variables from the new model that did not have a statistically significant t-test or created a high risk of multicollinearity. Since there was an observation for every pitch in every MLB regular season game, the independence assumption was violated. This is because every pitcher and batter has some distinct ability that is not necessarily measured by the variables in the data, but the data involved hudreds of different batters and pitchers. RStudio was not able to create a random intercept logistic regression model to compensate for this violation, so I was forced to proceed despite this limitation.
+
+
+###METHODS
+
+
+####DATA COLLECTION
+
+All the data was directly retrieved from Baseball Savant, a partner of Major League Baseball, and FanGraphs. 
+
+Data for every pitch during a regular season MLB game from 2008-2018 was collected. Data from 2008-2016 was used to create the new variables described above and then discarded. All observations from 2017-2018 were used for analysis.
+
+During the process of cleaning the data and created the new variables, a large number of observations dissappeared because of what seemed to be a non-random reason. The graph below shows the distribution of all pitches in the data within a model of the legal strike zone. (The strike zone looks augmented, but it is actually proportional to a real strike zone according to its coordinates.)
+
+```{r echo=FALSE}
+topKzone = 100
+botKzone = -100
+inKzone = -100
+outKzone = 100
+kZone = data.frame(
+  x = c(inKzone, inKzone, outKzone, outKzone, inKzone)
+  , y = c(botKzone, topKzone, topKzone, botKzone, botKzone)
+)
+
+ggplot() +
+  geom_point(data = data, aes(x=horiz_adj, y=vert_adj, col=as.factor(zone))) +
+  geom_path(aes(x, y), data = kZone) + xlab("Strike Zone Width") + ylab("Strike Zone Height") + ggtitle("Pitch Location Distribution") + theme(legend.position="bottom")
+```
+
+As can be seen in this graph, there are large gaps where no pitches seem to have been thrown, and not all 25 zones are listed. In reality, the entire strike zone should be overflowing with pitches. This means that a large numer of observations in general were deleted and/or replaced by similar but "fake" observations. There was no time to fix this error, meaning that the results can only be generalized to this specific dataset, and any unrealistic interpretations are because of erroneous data, not necessarily because of analytical errors.
+
+
+####MEASURE
+
+The data contains 1,520,525 observations. Each observation represented a discrete pitch during a regular season MLB game between 2017 and 2018. Every pitch during these two years is *theoretically* contained in the data. For each observation, there are 998 variables.
+
+The dependent variable for analysis was the batted ball type, a discrete variable in which a 1 represented the batter hitting the ball into fair territory, regardless of the outcome of the hit, and a 0 represented a batter not hitting the ball. 
+
+The most important of the independent variables are: the temperature in farenheit, the weather type, the pitch speed in miles per hour, the release position of the pitch in three dimensions in feet, the throwing arm of the pitcher, the stance of the batter, the call on the pitch, the number of balls in the count, the number of strikes in the count, the horizontal and vertical movement of the pitch between the release point and home plate, the velocity of the pitch at release in three dimensions, the acceration of the pitch in three dimensions, the effective speed of the pitch, the spin rate of the pitch in rotations per minut, the adjusted pitch location in the strike zone, the pitcher and batter birth year, the direction of the wind, and the wind speed in miles per hour. There were also variables for the total number of hits, games, plate appearances/innings pitched, walks, strikes, swings, whiffs, and homeruns, average hits per game, average plate appearances/innings pitched per game, and batting average by a hitter and against a pitcher in their careers (since 2008) and in 2017 through 2018. There were also similar variables for each zone in the strike zone across the same spans of time, except as proportions of total pitches received or thrown. More thorough explanation of the variables can be found in the codebook.
+
+
+####DATA ANALYSIS
+
+Since the majority of variables collected all were very minor, all exploratory graphs did not seem to show any variables having any significance in predicting the odds of a batter hitting the ball into fair territory. Instead, all other work was forced to be theoretical rather than visual.
+
+Using RStudio, I constructed 9 different logistic regressions, all with batted ball type as a dependent variable. For every model, because of the size of the data, because it was corrupted, and because of time limitations, I was not able to conduct a stepwise selection. Instead, to create the models I created univariate logistic regression models for each possible covariate for that model and recorded the p-value of each Wald-test for that covariate. After completing this for every covariate in question for each model, I took all of the most statistically significant covariates ($p < 2e-16$) and combined them into a single model. I then slowly deleted the covariates that were not statistically significant at an alpha level of $\alpha = 0.05$ or that caused multicollinearity with a $VIF > 4$ until all the covariates were statistically significant according to t-tests. No interaction terms or flexible models were considered because there was no evidence that was necessary.
+
+The first and ninth model were meant to predict the odds that a batter would have hit a pitch in hindsight using basic observations (other than career statistics). The covariates in consideration for this model were: the home team, the away team, the field, the temperature, the general weather, the umpire behind home plate, the pitch type, the speed of the pitch at release, the location of the release of the pitch (in three dimensions), the pitcher, the batter, the zone the pitch ended up, the stance of the batter (left or right), the throwing arm of the pitcher, the call on the pitch, the number of strikes in the count, the number of balls in the count, the horizontal movement of the pitch, the vertical movement of the pitch, the velocity of the pitch at release (in three dimensions), the acceration of the pitch (in three dimensions), the how fast the pitch felt for the batter, the spin rate of the pitch, the actual location of the pitch in the strike zone (in two dimensions), the birth year of the batter, the birth year of the pitcher, the direction the wind was blowing, and the speed of the wind. 
+
+The second through eighth model were meant to predict the odds that a batter will hit a pitch. The covariates in consideration for the second model were all the covariates in consideration for the first except for those that would require seeing the pitch. The covariates in consideration for the third model were all the general career statistics for batters and pitchers in addition to the covariates for the second model. The covariates in consideration for the fourth model were all the general statistics for batters and pitcher over 2017 and 2018 in addition to the covariates for the second model. The covariates in consideration for the fifth model were all the zone-specific career statistics for batters and pitcher in addition ot the covariated for the second model. The covariates in consideration for the sixth model were all the zone-specific statistics for batters and pitcher over 2017 and 2018 in addition to the covariates for the second model. The covariates in consideration for the seventh model were all the matchup-specific zone-specific statistics (i.e. zone-specific statistics for a player over some amount of time times the respective statistic for the other player) for batters and pitcher over their careers and 2017 and 2018 in addition to the covariates for the second model. The eighth model considered all the covariates in models two through seven. 
+
+The ninth model considered all the covariates from the eighth model in addition to those from the first model. A table of all the variables in consideration for each model can be found in the Appendix.
+
+
+```{r include=FALSE}
+grp1 <- data %>% dplyr::select(game_date, home_team, away_team, venue_name, temperature, other_weather, umpire_hp, pitch_type, release_speed, release_pos_z, release_pos_x, release_pos_y, pitcher, batter, zone, stand, p_throws, type, balls, strikes, pfx_x, pfx_z, vx0, vy0, vz0, ax, az, ay, effective_speed, release_spin_rate, horiz_adj, vert_adj, birth_year, pit_birth_year, wind_dir, wind_speed, bb_type)
+# Omit NAs for grp1 
+grp1 <- na.omit(grp1)
+
+grp2 <- data %>% dplyr::select(game_date, home_team, away_team, venue_name, pitcher, batter, temperature, other_weather, umpire_hp, stand, p_throws, balls, strikes, birth_year, pit_birth_year, wind_dir, wind_speed, bb_type)
+
+
+a <- data %>% dplyr::select(starts_with("Car"), car_bat_h_per_game, car_bat_avg_pa, car_bat_ba, car_bat_hits, car_pit_FIP, car_pit_h9, car_pit_avg_ip, car_pit_ba, car_pit_noh9, car_pit_hits, car_pit_k_bb, -contains("zone"), - contains("pitch"), -contains("car_pit_k_bb"))
+grp3 <- bind_cols(grp2, a)
+
+b <- data %>% dplyr::select(starts_with("Biseason"), starts_with("biseason"))
+grp4 <- bind_cols(grp2, b)
+
+
+c <- data %>% dplyr::select(contains("zone")) %>% dplyr::select(starts_with("car"))
+grp5 <- bind_cols(grp2, c)
+
+
+d <- data %>% dplyr::select(contains("zone")) %>% dplyr::select(starts_with("bi"))
+grp6 <- bind_cols(grp2, d)
+
+
+e <- data %>% dplyr::select(starts_with("mat"))
+grp7 <- bind_cols(e, grp2)
+
+
+grp8 <- bind_cols(grp2, grp3, grp4, grp5, grp6, grp7)
+# Omit NAs for grp8 
+grp8 <- na.omit(grp8)
+
+grp9 <- data %>% dplyr::select(bb_type, vert_adj, release_spin_rate, horiz_adj, pfx_z, pfx_x, stand, temperature, p_throws, balls, strikes, wind_dir, mat_bi_k_bb_prop_zone5, mat_bi_k_bb_prop_zone12, mat_bi_k_bb_prop_zone22, mat_car_ba_prop_zone12, bi_bat_pitch_prop_zone5, bi_bat_whiff_prop_zone2, bi_bat_swing_prop_zone2, bi_bat_swing_prop_zone30, bi_bat_k_bb_prop_zone1, bi_bat_k_bb_prop_zone2, bi_pit_hits_prop_zone2, bi_pit_hits_prop_zone5, bi_pit_hits_prop_zone12, Biseason_bat_H, Biseason_bat_BB, Car_bat_Whiffs, Car_pit_H)
+# Omit NAs for grp9 
+grp9 <- na.omit(grp9)
+
+# Omit NAs for grp2 
+grp2 <- na.omit(grp2)
+# Omit NAs for grp3 
+grp3 <- na.omit(grp3)
+# Omit NAs for grp4 
+grp4 <- na.omit(grp4)
+# Omit NAs for grp5 
+grp5 <- na.omit(grp5)
+# Omit NAs for grp6 
+grp6 <- na.omit(grp6)
+# Omit NAs for grp7 
+grp7 <- na.omit(grp7)
+```
+
+```{r eval=FALSE, include=FALSE}
+## Initial stepwise selection on grp1
+g <- glm(bb_type ~ 1, family = binomial, data = data)
+g1 <- update(g, . ~ . + batter)
+anova(g, g1) ## Deviance =  799.44 
+g2 <- update(g, . ~ . + pitcher)
+anova(g, g2) ## Deviance = 755.02
+g3 <- update(g, . ~ . + release_speed); summary(g3) ## p = 0.155
+g4 <- update(g, . ~ . + as.factor(pitch_type)); anova(g,g4) ## Deviance = 39.431
+g5 <- update(g, . ~ . + effective_speed); summary(g5) ## p = 0.122
+g6 <- update(g, . ~ . + as.factor(stand)); anova(g,g6) ## Deviance = 0.2468
+g7 <- update(g, . ~ . + as.factor(p_throws)); anova(g,g7) ## Deviance = 0.024031
+g8 <- update(g, . ~ . + release_pos_y); summary(g8) ## p = 0.484
+g9 <- update(g, . ~ . + release_pos_x); summary(g9) ## p = 0.719 
+g10 <- update(g, . ~ . + release_pos_z); summary(g10) ## p = 0.130723 
+g11 <- update(g, . ~ . + as.factor(zone)); summary(g11) ## Deviance = 512.83
+anova(g,g11)
+g12 <- update(g, . ~ . + as.factor(type)); summary(g12) ## Deviance = 9212.2
+anova(g,g12)
+g13 <- update(g, . ~ . + as.factor(balls)); summary(g13) ## Deviance = 135.7
+anova(g,g13)
+g14 <- update(g, . ~ . + as.factor(strikes)); summary(g14) ## Deviance = 143.45
+anova(g,g14)
+g15 <- update(g, . ~ . + release_spin_rate); summary(g15) ## p = 0.000118
+g16 <- update(g, . ~ . + pfx_x); summary(g16) ## p = 0.129
+g17 <- update(g, . ~ . + pfx_z); summary(g17)## p = 0.381
+g18 <- update(g, . ~ . + vx0); summary(g18)## p = 0.98 
+g19 <- update(g, . ~ . + vz0); summary(g19) ## p = 0.00191
+g20 <- update(g, . ~ . + vy0); summary(g20)## p = 0.111
+g21 <- update(g, . ~ . + ax); summary(g21) ## p = 0.216
+g22 <- update(g, . ~ . + az); summary(g22) ## p = 0.929
+g23 <- update(g, . ~ . + ay); summary(g23) ## p = 0.998
+g24 <- update(g, . ~ . + horiz_adj); summary(g24)## p = 0.0544
+g25 <- update(g, . ~ . + vert_adj); summary(g25) ## p = 2.36e-11
+g26 <- update(g, . ~ . + umpire_hp); summary(g26) ## Deviance = 101.6
+anova(g,g26)
+g27 <- update(g, . ~ . + as.factor(other_weather)); summary(g27) ## Deviance =  5.6448
+anova(g,g27)
+g28 <- update(g, . ~ . + wind_speed); summary(g28) ## p = 0.815
+g29 <- update(g, . ~ . + temperature); summary(g29) ## p = 0.196
+g30 <- update(g, . ~ . + birth_year); summary(g30) ## p = 0.359
+g31 <- update(g, . ~ . + pit_birth_year); summary(g31) ## p = 0.570
+g32 <- update(g, . ~ . + venue_name); anova(g,g32) ## Deviance = 43.777
+g33 <- update(g, . ~ . + game_date); summary(g33) ## p = 0.990
+g35 <- update(g, . ~ . + home_team); summary(g35) ## Deviance = 43.302
+anova(g,g35)
+g36 <- update(g, . ~ . + away_team); summary(g36) ## Deviance = 32.37
+anova(g,g36)
+```
+
+```{r include=FALSE}
+fit1 <- glm(bb_type ~ vert_adj + release_spin_rate + horiz_adj + pfx_z + pfx_x + as.factor(stand) + as.factor(p_throws), family = binomial, data = grp1); summary(fit1); car::vif(fit1)
+```
+
+```{r include=FALSE}
+fit2 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + wind_speed, family = binomial, data = grp2); summary(fit2)
+car::vif(fit2)
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp 5
+g <- glm(bb_type ~ 1, family = binomial, data = grp5)
+g1 <- update(g, . ~ . + Car_bat_H); summary(g1) ## p <2e-16
+g2 <- update(g, . ~ . + Car_bat_G); summary(g2) ## p <2e-16
+g3 <- update(g, . ~ . + Car_bat_PA); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + Car_bat_HBP); summary(g4)## p = 0.000622
+g5 <- update(g, . ~ . + Car_bat_BB); summary(g5)## p = 2.7e-07
+g6 <- update(g, . ~ . + Car_bat_K); summary(g6)## p = 2.37e-12
+g7 <- update(g, . ~ . + Car_bat_Swings); summary(g7)## p <2e-16
+g8 <- update(g, . ~ . + Car_bat_Whiffs); summary(g8)## p <2e-16
+g9 <- update(g, . ~ . + Car_pit_H); summary(g9) ## p <2e-16
+g10 <- update(g, . ~ . + Car_pit_G); summary(g10)## p <2e-16
+g11 <- update(g, . ~ . + Car_pit_IP); summary(g11)## p = 4.79e-05
+g12 <- update(g, . ~ . + Car_pit_HR); summary(g12)## p = 7.96e-15
+g13 <- update(g, . ~ . + Car_pit_BB); summary(g13)## p = 0.183
+g14 <- update(g, . ~ . + Car_pit_K); summary(g14)## p = 1.3e-15
+g15 <- update(g, . ~ . + Car_pit_Swings); summary(g15)## p = 0.115
+g16 <- update(g, . ~ . + Car_pit_Whiffs); summary(g16)## p = 0.00479
+g17 <- update(g, . ~ . + Car_pit_BF); summary(g17)## p = 4.79e-05
+g18 <- update(g, . ~ . + car_bat_h_per_game); summary(g18)## p = 0.0105
+g19 <- update(g, . ~ . + car_bat_hits); summary(g19)## p = 0.374
+g20 <- update(g, . ~ . + car_bat_avg_pa); summary(g20)## p = 0.0281
+g21 <- update(g, . ~ . + car_bat_ba); summary(g21)## p = 0.141
+g22 <- update(g, . ~ . + car_pit_FIP); summary(g22)## p = 3.02e-14
+g23 <- update(g, . ~ . + car_pit_h9); summary(g23)## p = 0.541
+g24 <- update(g, . ~ . + car_pit_noh9); summary(g24)## p = 0.385
+g26 <- update(g, . ~ . + car_pit_hits); summary(g26)## p = 0.205
+g27 <- update(g, . ~ . + car_pit_avg_ip); summary(g27)## p = 0.000131
+g28 <- update(g, . ~ . + car_pit_ba); summary(g28)## p = 0.541
+```
+
+```{r include=FALSE}
+fit3 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + Car_bat_H + Car_pit_H + Car_pit_G, family = binomial, data = grp3); summary(fit3); car::vif(fit3)
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3 
+g <- glm(bb_type ~ 1, family = binomial, data = grp3)
+g2 <- update(g, . ~ . + car_bat_pitch_prop_zone1); summary(g2) ## p = 0.2
+g3 <- update(g, . ~ . + car_bat_pitch_prop_zone2); summary(g3) ## p = 1.1e-07
+g4 <- update(g, . ~ . + car_bat_pitch_prop_zone3); summary(g4) ## p = 0.877
+g5 <- update(g, . ~ . + car_bat_pitch_prop_zone4); summary(g5) ## p = 0.147
+g6 <- update(g, . ~ . + car_bat_pitch_prop_zone5); summary(g6) ## p <2e-16 
+g7 <- update(g, . ~ . + car_bat_pitch_prop_zone6); summary(g7) ## p = 0.0027
+g8 <- update(g, . ~ . + car_bat_pitch_prop_zone7); summary(g8) ## p = 4.86e-06
+g9 <- update(g, . ~ . + car_bat_pitch_prop_zone8); summary(g9) ## p <2e-16 
+g10 <- update(g, . ~ . + car_bat_pitch_prop_zone9); summary(g10) ## p = 0.812
+g11 <- update(g, . ~ . + car_bat_pitch_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_bat_pitch_prop_zone12); summary(g12) ## p = <2e-16
+g13 <- update(g, . ~ . + car_bat_pitch_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_bat_pitch_prop_zone14); summary(g14) ## p = 1.08e-14
+g15 <- update(g, . ~ . + car_bat_pitch_prop_zone16); summary(g15) ## p = 0.541
+g16 <- update(g, . ~ . + car_bat_pitch_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_bat_pitch_prop_zone18); summary(g17) ## p = 1.01e-15
+g18 <- update(g, . ~ . + car_bat_pitch_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_bat_pitch_prop_zone21); summary(g19) ## p = 0.175
+g20 <- update(g, . ~ . + car_bat_pitch_prop_zone22); summary(g20) ## p = 2.21e-08
+g21 <- update(g, . ~ . + car_bat_pitch_prop_zone23); summary(g21) ## p = 0.0286
+g22 <- update(g, . ~ . + car_bat_pitch_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_bat_pitch_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_bat_pitch_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_bat_pitch_prop_zone28); summary(g25) ## p = 0.308
+g26 <- update(g, . ~ . + car_bat_pitch_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_bat_pitch_prop_zone30); summary(g27) ## p = 1.56e-10
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3 
+g2 <- update(g, . ~ . + car_bat_swing_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + car_bat_swing_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + car_bat_swing_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_bat_swing_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + car_bat_swing_prop_zone5); summary(g6) ## p = 2.24e-11 
+g7 <- update(g, . ~ . + car_bat_swing_prop_zone6); summary(g7) ## p = 0.502
+g8 <- update(g, . ~ . + car_bat_swing_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_bat_swing_prop_zone8); summary(g9) ## p = 1.52e-07
+g10 <- update(g, . ~ . + car_bat_swing_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + car_bat_swing_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_bat_swing_prop_zone12); summary(g12) ## p <2e-16 
+g13 <- update(g, . ~ . + car_bat_swing_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_bat_swing_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_bat_swing_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_bat_swing_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_bat_swing_prop_zone18); summary(g17) ## p = 0.000359
+g18 <- update(g, . ~ . + car_bat_swing_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_bat_swing_prop_zone21); summary(g19) ## p = 7.25e-07
+g20 <- update(g, . ~ . + car_bat_swing_prop_zone22); summary(g20) ## p <2e-16 
+g21 <- update(g, . ~ . + car_bat_swing_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + car_bat_swing_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_bat_swing_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_bat_swing_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_bat_swing_prop_zone28); summary(g25) ## p = 0.269
+g26 <- update(g, . ~ . + car_bat_swing_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_bat_swing_prop_zone30); summary(g27) ## p <2e-16 
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3 
+g2 <- update(g, . ~ . + car_bat_whiff_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + car_bat_whiff_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + car_bat_whiff_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_bat_whiff_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + car_bat_whiff_prop_zone5); summary(g6) ## p = 6.8e-06 
+g7 <- update(g, . ~ . + car_bat_whiff_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + car_bat_whiff_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_bat_whiff_prop_zone8); summary(g9) ## p = 1.3e-05
+g10 <- update(g, . ~ . + car_bat_whiff_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + car_bat_whiff_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_bat_whiff_prop_zone12); summary(g12) ## p = 0.132 
+g13 <- update(g, . ~ . + car_bat_whiff_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_bat_whiff_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_bat_whiff_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_bat_whiff_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_bat_whiff_prop_zone18); summary(g17) ## p = 0.308
+g18 <- update(g, . ~ . + car_bat_whiff_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_bat_whiff_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + car_bat_whiff_prop_zone22); summary(g20) ## p = 5.84e-06
+g21 <- update(g, . ~ . + car_bat_whiff_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + car_bat_whiff_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_bat_whiff_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_bat_whiff_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_bat_whiff_prop_zone28); summary(g25) ## p = 1.56e-08
+g26 <- update(g, . ~ . + car_bat_whiff_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_bat_whiff_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3 
+g2 <- update(g, . ~ . + car_bat_k_bb_prop_zone1); summary(g2) ## p <2e-16 
+g3 <- update(g, . ~ . + car_bat_k_bb_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + car_bat_k_bb_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_bat_k_bb_prop_zone4); summary(g5) ## p = 0.000547
+g6 <- update(g, . ~ . + car_bat_k_bb_prop_zone5); summary(g6) ## p <2e-16  
+g7 <- update(g, . ~ . + car_bat_k_bb_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + car_bat_k_bb_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_bat_k_bb_prop_zone8); summary(g9) ## p = 0.142
+g10 <- update(g, . ~ . + car_bat_k_bb_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + car_bat_k_bb_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_bat_k_bb_prop_zone12); summary(g12) ## p <2e-16  
+g13 <- update(g, . ~ . + car_bat_k_bb_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_bat_k_bb_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_bat_k_bb_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_bat_k_bb_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_bat_k_bb_prop_zone18); summary(g17) ## p = 0.311 
+g18 <- update(g, . ~ . + car_bat_k_bb_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_bat_k_bb_prop_zone21); summary(g19) ## p = 0.322
+g20 <- update(g, . ~ . + car_bat_k_bb_prop_zone22); summary(g20) ## p <2e-16 
+g21 <- update(g, . ~ . + car_bat_k_bb_prop_zone23); summary(g21) ## p = 0.0931
+g22 <- update(g, . ~ . + car_bat_k_bb_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_bat_k_bb_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_bat_k_bb_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_bat_k_bb_prop_zone28); summary(g25) ## p = 2.38e-10
+g26 <- update(g, . ~ . + car_bat_k_bb_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_bat_k_bb_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3 
+g2 <- update(g, . ~ . + car_bat_ba_prop_zone1); summary(g2) ## p = 0.924
+g3 <- update(g, . ~ . + car_bat_ba_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + car_bat_ba_prop_zone3); summary(g4) ## p = 0.123
+g5 <- update(g, . ~ . + car_bat_ba_prop_zone4); summary(g5) ## p = 0.452
+g6 <- update(g, . ~ . + car_bat_ba_prop_zone5); summary(g6) ## p <2e-16  
+g7 <- update(g, . ~ . + car_bat_ba_prop_zone6); summary(g7) ## p = 0.0576
+g8 <- update(g, . ~ . + car_bat_ba_prop_zone7); summary(g8) ## p = 3.66e-07
+g9 <- update(g, . ~ . + car_bat_ba_prop_zone8); summary(g9) ## p = 6.39e-08
+g10 <- update(g, . ~ . + car_bat_ba_prop_zone9); summary(g10) ## p = 0.241
+g11 <- update(g, . ~ . + car_bat_ba_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_bat_ba_prop_zone12); summary(g12) ## p <2e-16  
+g13 <- update(g, . ~ . + car_bat_ba_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_bat_ba_prop_zone14); summary(g14) ## p = 7.07e-14
+g15 <- update(g, . ~ . + car_bat_ba_prop_zone16); summary(g15) ## p = 0.509
+g16 <- update(g, . ~ . + car_bat_ba_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_bat_ba_prop_zone18); summary(g17) ## p = 0.00129 
+g18 <- update(g, . ~ . + car_bat_ba_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_bat_ba_prop_zone21); summary(g19) ## p = 0.0604
+g20 <- update(g, . ~ . + car_bat_ba_prop_zone22); summary(g20) ## p <2e-16 
+g21 <- update(g, . ~ . + car_bat_ba_prop_zone23); summary(g21) ## p = 0.0799
+g22 <- update(g, . ~ . + car_bat_ba_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_bat_ba_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_bat_ba_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_bat_ba_prop_zone28); summary(g25) ## p = 0.268
+g26 <- update(g, . ~ . + car_bat_ba_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_bat_ba_prop_zone30); summary(g27) ## p = 0.000421
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3
+g <- glm(bb_type ~ 1, family = binomial, data = grp3)
+g2 <- update(g, . ~ . + car_pit_pitches_prop_zone1); summary(g2) ## p = 0.307
+g3 <- update(g, . ~ . + car_pit_pitches_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + car_pit_pitches_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_pit_pitches_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + car_pit_pitches_prop_zone5); summary(g6) ## p = 0.781
+g7 <- update(g, . ~ . + car_pit_pitches_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + car_pit_pitches_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_pit_pitches_prop_zone8); summary(g9) ## p = 6.23e-15
+g10 <- update(g, . ~ . + car_pit_pitches_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + car_pit_pitches_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_pit_pitches_prop_zone12); summary(g12) ## p = 7.99e-09
+g13 <- update(g, . ~ . + car_pit_pitches_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_pit_pitches_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_pit_pitches_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_pit_pitches_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_pit_pitches_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + car_pit_pitches_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_pit_pitches_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + car_pit_pitches_prop_zone22); summary(g20) ## p <2e-16
+g21 <- update(g, . ~ . + car_pit_pitches_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + car_pit_pitches_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_pit_pitches_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_pit_pitches_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_pit_pitches_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + car_pit_pitches_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_pit_pitches_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3
+g <- glm(bb_type ~ 1, family = binomial, data = grp3)
+g2 <- update(g, . ~ . + car_pit_swings_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + car_pit_swings_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + car_pit_swings_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_pit_swings_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + car_pit_swings_prop_zone5); summary(g6) ## p = 2.84e-12
+g7 <- update(g, . ~ . + car_pit_swings_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + car_pit_swings_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_pit_swings_prop_zone8); summary(g9) ## p <2e-16
+g10 <- update(g, . ~ . + car_pit_swings_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + car_pit_swings_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_pit_swings_prop_zone12); summary(g12) ## p = 4.03e-10
+g13 <- update(g, . ~ . + car_pit_swings_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_pit_swings_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_pit_swings_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_pit_swings_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_pit_swings_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + car_pit_swings_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_pit_swings_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + car_pit_swings_prop_zone22); summary(g20) ## p <2e-16 
+g21 <- update(g, . ~ . + car_pit_swings_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + car_pit_swings_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_pit_swings_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_pit_swings_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_pit_swings_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + car_pit_swings_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_pit_swings_prop_zone30); summary(g27) ## p <2e-16 
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3
+g <- glm(bb_type ~ 1, family = binomial, data = grp3)
+g2 <- update(g, . ~ . + car_pit_whiffs_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + car_pit_whiffs_prop_zone2); summary(g3) ## p = NA
+g4 <- update(g, . ~ . + car_pit_whiffs_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_pit_whiffs_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + car_pit_whiffs_prop_zone5); summary(g6) ## p <2e-16
+g7 <- update(g, . ~ . + car_pit_whiffs_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + car_pit_whiffs_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_pit_whiffs_prop_zone8); summary(g9) ## p = 5.42e-10
+g10 <- update(g, . ~ . + car_pit_whiffs_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + car_pit_whiffs_prop_zone11); summary(g11) ## p = NA 
+g12 <- update(g, . ~ . + car_pit_whiffs_prop_zone12); summary(g12) ## p = NA
+g13 <- update(g, . ~ . + car_pit_whiffs_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_pit_whiffs_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_pit_whiffs_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_pit_whiffs_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_pit_whiffs_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + car_pit_whiffs_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_pit_whiffs_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + car_pit_whiffs_prop_zone22); summary(g20) ## p = NA
+g21 <- update(g, . ~ . + car_pit_whiffs_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + car_pit_whiffs_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_pit_whiffs_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_pit_whiffs_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_pit_whiffs_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + car_pit_whiffs_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_pit_whiffs_prop_zone30); summary(g27) ## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3
+g <- glm(bb_type ~ 1, family = binomial, data = grp3)
+g2 <- update(g, . ~ . + car_pit_hits_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + car_pit_hits_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + car_pit_hits_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_pit_hits_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + car_pit_hits_prop_zone5); summary(g6) ## p <2e-16 
+g7 <- update(g, . ~ . + car_pit_hits_prop_zone6); summary(g7) ## p = NA 
+g8 <- update(g, . ~ . + car_pit_hits_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_pit_hits_prop_zone8); summary(g9) ## p = NA
+g10 <- update(g, . ~ . + car_pit_hits_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + car_pit_hits_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + car_pit_hits_prop_zone12); summary(g12) ## p <2e-16
+g13 <- update(g, . ~ . + car_pit_hits_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_pit_hits_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_pit_hits_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_pit_hits_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_pit_hits_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + car_pit_hits_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_pit_hits_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + car_pit_hits_prop_zone22); summary(g20) ## p = 0.186
+g21 <- update(g, . ~ . + car_pit_hits_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + car_pit_hits_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_pit_hits_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_pit_hits_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_pit_hits_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + car_pit_hits_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_pit_hits_prop_zone30); summary(g27) ## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp3
+g <- glm(bb_type ~ 1, family = binomial, data = grp3)
+g2 <- update(g, . ~ . + car_pit_nohits_prop_zone1); summary(g2) ## p <2e-16 
+g3 <- update(g, . ~ . + car_pit_nohits_prop_zone2); summary(g3) ## p = 3.09e-11
+g4 <- update(g, . ~ . + car_pit_nohits_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + car_pit_nohits_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + car_pit_nohits_prop_zone5); summary(g6) ## p = 0.372
+g7 <- update(g, . ~ . + car_pit_nohits_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + car_pit_nohits_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + car_pit_nohits_prop_zone8); summary(g9) ## p = 8.87e-15
+g10 <- update(g, . ~ . + car_pit_nohits_prop_zone9); summary(g10) ## p = NA 
+g11 <- update(g, . ~ . + car_pit_nohits_prop_zone11); summary(g11) ## p = NA 
+g12 <- update(g, . ~ . + car_pit_nohits_prop_zone12); summary(g12) ## p <2e-16
+g13 <- update(g, . ~ . + car_pit_nohits_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + car_pit_nohits_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + car_pit_nohits_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + car_pit_nohits_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + car_pit_nohits_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + car_pit_nohits_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + car_pit_nohits_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + car_pit_nohits_prop_zone22); summary(g20) ## p <2e-16
+g21 <- update(g, . ~ . + car_pit_nohits_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + car_pit_nohits_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + car_pit_nohits_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + car_pit_nohits_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + car_pit_nohits_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + car_pit_nohits_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + car_pit_nohits_prop_zone30); summary(g27) ## p = <2e-16
+```
+
+```{r include=FALSE}
+fit5 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + as.factor(wind_dir) + wind_speed + car_pit_nohits_prop_zone30 + car_pit_nohits_prop_zone12 + car_pit_hits_prop_zone12 + car_pit_hits_prop_zone5 + car_pit_hits_prop_zone2 +  car_pit_swings_prop_zone22 + car_bat_k_bb_prop_zone2 + car_bat_k_bb_prop_zone5 + car_bat_k_bb_prop_zone12 + car_bat_k_bb_prop_zone22 + car_bat_swing_prop_zone30 + car_bat_pitch_prop_zone5, family = binomial, data = grp5); summary(fit5); car::vif(fit5)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## grp4
+g <- glm(bb_type ~ 1, family = binomial, data = grp4)
+g1 <- update(g, . ~ . + Biseason_bat_H); summary(g1) ## p <2e-16
+g2 <- update(g, . ~ . + Biseason_bat_G); summary(g2) ## p <2e-16
+g3 <- update(g, . ~ . + Biseason_bat_PA); summary(g3) ## p <2e-16
+g4 <- update(g, . ~ . + Biseason_bat_HBP); summary(g4)## p = 0.274
+g5 <- update(g, . ~ . + Biseason_bat_BB); summary(g5)## p <2e-16
+g6 <- update(g, . ~ . + Biseason_bat_K); summary(g6)## p <2e-16
+g7 <- update(g, . ~ . + Biseason_bat_Swings); summary(g7)## p <2e-16
+g8 <- update(g, . ~ . + Biseason_bat_Whiffs); summary(g8)## p = 2.97e-14
+g9 <- update(g, . ~ . + Biseason_pit_H); summary(g9) ## p <2e-16
+g10 <- update(g, . ~ . + Biseason_pit_G); summary(g10)## p <2e-16
+g11 <- update(g, . ~ . + Biseason_pit_IP); summary(g11)## p = 0.00418
+g12 <- update(g, . ~ . + Biseason_pit_HR); summary(g12)## p <2e-16
+g13 <- update(g, . ~ . + Biseason_pit_BB); summary(g13)## p = 1.07e-10
+g14 <- update(g, . ~ . + Biseason_pit_K); summary(g14)## p <2e-16 
+g15 <- update(g, . ~ . + Biseason_pit_Swings); summary(g15)## p = 0.0441
+g16 <- update(g, . ~ . + Biseason_pit_Whiffs); summary(g16)## p <2e-16 
+g17 <- update(g, . ~ . + Biseason_pit_BF); summary(g17)## p = 0.00418
+g18 <- update(g, . ~ . + biseason_bat_h_per_avg_pa); summary(g18)## p = 0.00643
+g19 <- update(g, . ~ . + biseason_bat_hits); summary(g19)## p = 0.00415
+g20 <- update(g, . ~ . + biseason_bat_avg_pa); summary(g20)## p = 7.27e-11
+g21 <- update(g, . ~ . + biseason_bat_ba); summary(g21)## p = 4.25e-12
+g22 <- update(g, . ~ . + biseason_pit_FIP); summary(g22)## p <2e-16 
+g24 <- update(g, . ~ . + biseason_pit_noh9); summary(g24)## p = 0.064
+g26 <- update(g, . ~ . + biseason_pit_hits); summary(g26)## p = 0.00315
+g27 <- update(g, . ~ . + biseason_pit_avg_ip); summary(g27)## p = 0.11
+g28 <- update(g, . ~ . + biseason_pit_ba); summary(g28)## p = 0.0448
+```
+
+```{r include=FALSE}
+fit4 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + wind_speed + Biseason_bat_H + Biseason_bat_BB + Biseason_pit_H + Biseason_pit_G + Biseason_pit_K + biseason_pit_FIP, family = binomial, data = grp4); summary(fit4); car::vif(fit4)
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6 
+g <- glm(bb_type ~ 1, family = binomial, data = grp6)
+g2 <- update(g, . ~ . + bi_bat_pitch_prop_zone1); summary(g2) ## p = 0.2
+g3 <- update(g, . ~ . + bi_bat_pitch_prop_zone2); summary(g3) ## p = 1.1e-07
+g4 <- update(g, . ~ . + bi_bat_pitch_prop_zone3); summary(g4) ## p = 0.877
+g5 <- update(g, . ~ . + bi_bat_pitch_prop_zone4); summary(g5) ## p = 0.147
+g6 <- update(g, . ~ . + bi_bat_pitch_prop_zone5); summary(g6) ## p <2e-16 
+g7 <- update(g, . ~ . + bi_bat_pitch_prop_zone6); summary(g7) ## p = 0.0027
+g8 <- update(g, . ~ . + bi_bat_pitch_prop_zone7); summary(g8) ## p = 4.86e-06
+g9 <- update(g, . ~ . + bi_bat_pitch_prop_zone8); summary(g9) ## p <2e-16 
+g10 <- update(g, . ~ . + bi_bat_pitch_prop_zone9); summary(g10) ## p = 0.812
+g11 <- update(g, . ~ . + bi_bat_pitch_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_bat_pitch_prop_zone12); summary(g12) ## p <2e-16 
+g13 <- update(g, . ~ . + bi_bat_pitch_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_bat_pitch_prop_zone14); summary(g14) ## p = 1.08e-14
+g15 <- update(g, . ~ . + bi_bat_pitch_prop_zone16); summary(g15) ## p = 0.541
+g16 <- update(g, . ~ . + bi_bat_pitch_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_bat_pitch_prop_zone18); summary(g17) ## p = 1.01e-15
+g18 <- update(g, . ~ . + bi_bat_pitch_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_bat_pitch_prop_zone21); summary(g19) ## p = 0.175
+g20 <- update(g, . ~ . + bi_bat_pitch_prop_zone22); summary(g20) ## p = 2.21e-08
+g21 <- update(g, . ~ . + bi_bat_pitch_prop_zone23); summary(g21) ## p = 0.0286
+g22 <- update(g, . ~ . + bi_bat_pitch_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_bat_pitch_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_bat_pitch_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_bat_pitch_prop_zone28); summary(g25) ## p = 0.308
+g26 <- update(g, . ~ . + bi_bat_pitch_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_bat_pitch_prop_zone30); summary(g27) ## p = 1.56e-10
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6 
+g2 <- update(g, . ~ . + bi_bat_swing_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + bi_bat_swing_prop_zone2); summary(g3) ## p <2e-16
+g4 <- update(g, . ~ . + bi_bat_swing_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_bat_swing_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + bi_bat_swing_prop_zone5); summary(g6) ## p = 2.24e-11  
+g7 <- update(g, . ~ . + bi_bat_swing_prop_zone6); summary(g7) ## p = 0.502
+g8 <- update(g, . ~ . + bi_bat_swing_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_bat_swing_prop_zone8); summary(g9) ## p = 1.52e-07
+g10 <- update(g, . ~ . + bi_bat_swing_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_bat_swing_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_bat_swing_prop_zone12); summary(g12) ## p <2e-16
+g13 <- update(g, . ~ . + bi_bat_swing_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_bat_swing_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_bat_swing_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_bat_swing_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_bat_swing_prop_zone18); summary(g17) ## p = 0.000359
+g18 <- update(g, . ~ . + bi_bat_swing_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_bat_swing_prop_zone21); summary(g19) ## p = 7.25e-07
+g20 <- update(g, . ~ . + bi_bat_swing_prop_zone22); summary(g20) ## p <2e-16 
+g21 <- update(g, . ~ . + bi_bat_swing_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + bi_bat_swing_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_bat_swing_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_bat_swing_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_bat_swing_prop_zone28); summary(g25) ## p = 0.269
+g26 <- update(g, . ~ . + bi_bat_swing_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_bat_swing_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6 
+g2 <- update(g, . ~ . + bi_bat_whiff_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + bi_bat_whiff_prop_zone2); summary(g3) ## p = <2e-16
+g4 <- update(g, . ~ . + bi_bat_whiff_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_bat_whiff_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + bi_bat_whiff_prop_zone5); summary(g6) ## p = 6.8e-06
+g7 <- update(g, . ~ . + bi_bat_whiff_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + bi_bat_whiff_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_bat_whiff_prop_zone8); summary(g9) ## p = 1.3e-05
+g10 <- update(g, . ~ . + bi_bat_whiff_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_bat_whiff_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_bat_whiff_prop_zone12); summary(g12) ## p = 0.132
+g13 <- update(g, . ~ . + bi_bat_whiff_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_bat_whiff_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_bat_whiff_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_bat_whiff_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_bat_whiff_prop_zone18); summary(g17) ## p = 0.308
+g18 <- update(g, . ~ . + bi_bat_whiff_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_bat_whiff_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + bi_bat_whiff_prop_zone22); summary(g20) ## p = 5.84e-06
+g21 <- update(g, . ~ . + bi_bat_whiff_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + bi_bat_whiff_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_bat_whiff_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_bat_whiff_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_bat_whiff_prop_zone28); summary(g25) ## p = 1.56e-08
+g26 <- update(g, . ~ . + bi_bat_whiff_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_bat_whiff_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6 
+g2 <- update(g, . ~ . + bi_bat_k_bb_prop_zone1); summary(g2) ## p <2e-16 
+g3 <- update(g, . ~ . + bi_bat_k_bb_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + bi_bat_k_bb_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_bat_k_bb_prop_zone4); summary(g5) ## p = 0.000547
+g6 <- update(g, . ~ . + bi_bat_k_bb_prop_zone5); summary(g6) ## p <2e-16  
+g7 <- update(g, . ~ . + bi_bat_k_bb_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + bi_bat_k_bb_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_bat_k_bb_prop_zone8); summary(g9) ## p = 0.142
+g10 <- update(g, . ~ . + bi_bat_k_bb_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_bat_k_bb_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_bat_k_bb_prop_zone12); summary(g12) ## p <2e-16  
+g13 <- update(g, . ~ . + bi_bat_k_bb_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_bat_k_bb_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_bat_k_bb_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_bat_k_bb_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_bat_k_bb_prop_zone18); summary(g17) ## p = 0.311
+g18 <- update(g, . ~ . + bi_bat_k_bb_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_bat_k_bb_prop_zone21); summary(g19) ## p = 0.322
+g20 <- update(g, . ~ . + bi_bat_k_bb_prop_zone22); summary(g20) ## p <2e-16 
+g21 <- update(g, . ~ . + bi_bat_k_bb_prop_zone23); summary(g21) ## p = 0.0931
+g22 <- update(g, . ~ . + bi_bat_k_bb_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_bat_k_bb_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_bat_k_bb_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_bat_k_bb_prop_zone28); summary(g25) ## p = 2.38e-10
+g26 <- update(g, . ~ . + bi_bat_k_bb_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_bat_k_bb_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6 
+g2 <- update(g, . ~ . + bi_bat_ba_prop_zone1); summary(g2) ## p = 0.198
+g3 <- update(g, . ~ . + bi_bat_ba_prop_zone2); summary(g3) ## p = 0.754
+g4 <- update(g, . ~ . + bi_bat_ba_prop_zone3); summary(g4) ## p = 0.711
+g5 <- update(g, . ~ . + bi_bat_ba_prop_zone4); summary(g5) ## p = 0.181
+g6 <- update(g, . ~ . + bi_bat_ba_prop_zone5); summary(g6) ## p = 0.697 
+g7 <- update(g, . ~ . + bi_bat_ba_prop_zone6); summary(g7) ## p = 0.0148
+g8 <- update(g, . ~ . + bi_bat_ba_prop_zone7); summary(g8) ## p = 0.000743
+g9 <- update(g, . ~ . + bi_bat_ba_prop_zone8); summary(g9) ## p = 0.161
+g10 <- update(g, . ~ . + bi_bat_ba_prop_zone9); summary(g10) ## p = 0.17
+g11 <- update(g, . ~ . + bi_bat_ba_prop_zone11); summary(g11) ## p = 1.85e-05
+g12 <- update(g, . ~ . + bi_bat_ba_prop_zone12); summary(g12) ## p = 0.609
+g13 <- update(g, . ~ . + bi_bat_ba_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_bat_ba_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_bat_ba_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_bat_ba_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_bat_ba_prop_zone18); summary(g17) ## p = 0.571
+g18 <- update(g, . ~ . + bi_bat_ba_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_bat_ba_prop_zone21); summary(g19) ## p = 0.0143
+g20 <- update(g, . ~ . + bi_bat_ba_prop_zone22); summary(g20) ## p = 0.396
+g21 <- update(g, . ~ . + bi_bat_ba_prop_zone23); summary(g21) ## p <2e-16
+g22 <- update(g, . ~ . + bi_bat_ba_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_bat_ba_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_bat_ba_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_bat_ba_prop_zone28); summary(g25) ## p = 0.952
+g26 <- update(g, . ~ . + bi_bat_ba_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_bat_ba_prop_zone30); summary(g27) ## p = 0.396
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6
+g <- glm(bb_type ~ 1, family = binomial, data = grp6)
+g2 <- update(g, . ~ . + bi_pit_pitches_prop_zone1); summary(g2) ## p <2e-16
+g3 <- update(g, . ~ . + bi_pit_pitches_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + bi_pit_pitches_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_pit_pitches_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + bi_pit_pitches_prop_zone5); summary(g6) ## p = 0.781
+g7 <- update(g, . ~ . + bi_pit_pitches_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + bi_pit_pitches_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_pit_pitches_prop_zone8); summary(g9) ## p = 6.23e-15
+g10 <- update(g, . ~ . + bi_pit_pitches_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_pit_pitches_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_pit_pitches_prop_zone12); summary(g12) ## p = 7.99e-09
+g13 <- update(g, . ~ . + bi_pit_pitches_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_pit_pitches_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_pit_pitches_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_pit_pitches_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_pit_pitches_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + bi_pit_pitches_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_pit_pitches_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + bi_pit_pitches_prop_zone22); summary(g20) ## p <2e-16
+g21 <- update(g, . ~ . + bi_pit_pitches_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + bi_pit_pitches_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_pit_pitches_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_pit_pitches_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_pit_pitches_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + bi_pit_pitches_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_pit_pitches_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6
+g <- glm(bb_type ~ 1, family = binomial, data = grp6)
+g2 <- update(g, . ~ . + bi_pit_swings_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + bi_pit_swings_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + bi_pit_swings_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_pit_swings_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + bi_pit_swings_prop_zone5); summary(g6) ## p = 2.84e-12
+g7 <- update(g, . ~ . + bi_pit_swings_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + bi_pit_swings_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_pit_swings_prop_zone8); summary(g9) ## p <2e-16
+g10 <- update(g, . ~ . + bi_pit_swings_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_pit_swings_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_pit_swings_prop_zone12); summary(g12) ## p = 4.03e-10
+g13 <- update(g, . ~ . + bi_pit_swings_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_pit_swings_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_pit_swings_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_pit_swings_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_pit_swings_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + bi_pit_swings_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_pit_swings_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + bi_pit_swings_prop_zone22); summary(g20) ## p <2e-16 
+g21 <- update(g, . ~ . + bi_pit_swings_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + bi_pit_swings_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_pit_swings_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_pit_swings_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_pit_swings_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + bi_pit_swings_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_pit_swings_prop_zone30); summary(g27) ## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6
+g <- glm(bb_type ~ 1, family = binomial, data = grp6)
+g2 <- update(g, . ~ . + bi_pit_whiffs_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + bi_pit_whiffs_prop_zone2); summary(g3) ## p = NA
+g4 <- update(g, . ~ . + bi_pit_whiffs_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_pit_whiffs_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + bi_pit_whiffs_prop_zone5); summary(g6) ## p <2e-16
+g7 <- update(g, . ~ . + bi_pit_whiffs_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + bi_pit_whiffs_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_pit_whiffs_prop_zone8); summary(g9) ## p = 5.42e-10
+g10 <- update(g, . ~ . + bi_pit_whiffs_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_pit_whiffs_prop_zone11); summary(g11) ## p = NA  
+g12 <- update(g, . ~ . + bi_pit_whiffs_prop_zone12); summary(g12) ## p = NA
+g13 <- update(g, . ~ . + bi_pit_whiffs_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_pit_whiffs_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_pit_whiffs_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_pit_whiffs_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_pit_whiffs_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + bi_pit_whiffs_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_pit_whiffs_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + bi_pit_whiffs_prop_zone22); summary(g20) ## p = NA
+g21 <- update(g, . ~ . + bi_pit_whiffs_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + bi_pit_whiffs_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_pit_whiffs_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_pit_whiffs_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_pit_whiffs_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + bi_pit_whiffs_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_pit_whiffs_prop_zone30); summary(g27) ## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6
+g <- glm(bb_type ~ 1, family = binomial, data = grp6)
+g2 <- update(g, . ~ . + bi_pit_hits_prop_zone1); summary(g2) ## p = NA
+g3 <- update(g, . ~ . + bi_pit_hits_prop_zone2); summary(g3) ## p <2e-16 
+g4 <- update(g, . ~ . + bi_pit_hits_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_pit_hits_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + bi_pit_hits_prop_zone5); summary(g6) ## p <2e-16
+g7 <- update(g, . ~ . + bi_pit_hits_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + bi_pit_hits_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_pit_hits_prop_zone8); summary(g9) ## p = NA
+g10 <- update(g, . ~ . + bi_pit_hits_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_pit_hits_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_pit_hits_prop_zone12); summary(g12) ## p <2e-16
+g13 <- update(g, . ~ . + bi_pit_hits_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_pit_hits_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_pit_hits_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_pit_hits_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_pit_hits_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + bi_pit_hits_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_pit_hits_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + bi_pit_hits_prop_zone22); summary(g20) ## p = 0.186
+g21 <- update(g, . ~ . + bi_pit_hits_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + bi_pit_hits_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_pit_hits_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_pit_hits_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_pit_hits_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + bi_pit_hits_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_pit_hits_prop_zone30); summary(g27) ## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp6
+g <- glm(bb_type ~ 1, family = binomial, data = grp6)
+g2 <- update(g, . ~ . + bi_pit_nohits_prop_zone1); summary(g2) ## p <2e-16 
+g3 <- update(g, . ~ . + bi_pit_nohits_prop_zone2); summary(g3) ## p = 3.09e-11
+g4 <- update(g, . ~ . + bi_pit_nohits_prop_zone3); summary(g4) ## p = NA
+g5 <- update(g, . ~ . + bi_pit_nohits_prop_zone4); summary(g5) ## p = NA
+g6 <- update(g, . ~ . + bi_pit_nohits_prop_zone5); summary(g6) ## p = 0.372
+g7 <- update(g, . ~ . + bi_pit_nohits_prop_zone6); summary(g7) ## p = NA
+g8 <- update(g, . ~ . + bi_pit_nohits_prop_zone7); summary(g8) ## p = NA
+g9 <- update(g, . ~ . + bi_pit_nohits_prop_zone8); summary(g9) ## p = 8.87e-15
+g10 <- update(g, . ~ . + bi_pit_nohits_prop_zone9); summary(g10) ## p = NA
+g11 <- update(g, . ~ . + bi_pit_nohits_prop_zone11); summary(g11) ## p = NA
+g12 <- update(g, . ~ . + bi_pit_nohits_prop_zone12); summary(g12) ## p <2e-16
+g13 <- update(g, . ~ . + bi_pit_nohits_prop_zone13); summary(g13) ## p = NA
+g14 <- update(g, . ~ . + bi_pit_nohits_prop_zone14); summary(g14) ## p = NA
+g15 <- update(g, . ~ . + bi_pit_nohits_prop_zone16); summary(g15) ## p = NA
+g16 <- update(g, . ~ . + bi_pit_nohits_prop_zone17); summary(g16) ## p = NA
+g17 <- update(g, . ~ . + bi_pit_nohits_prop_zone18); summary(g17) ## p = NA
+g18 <- update(g, . ~ . + bi_pit_nohits_prop_zone19); summary(g18) ## p = NA
+g19 <- update(g, . ~ . + bi_pit_nohits_prop_zone21); summary(g19) ## p = NA
+g20 <- update(g, . ~ . + bi_pit_nohits_prop_zone22); summary(g20) ## p <2e-16
+g21 <- update(g, . ~ . + bi_pit_nohits_prop_zone23); summary(g21) ## p = NA
+g22 <- update(g, . ~ . + bi_pit_nohits_prop_zone24); summary(g22) ## p = NA
+g23 <- update(g, . ~ . + bi_pit_nohits_prop_zone26); summary(g23) ## p = NA
+g24 <- update(g, . ~ . + bi_pit_nohits_prop_zone27); summary(g24) ## p = NA
+g25 <- update(g, . ~ . + bi_pit_nohits_prop_zone28); summary(g25) ## p = NA
+g26 <- update(g, . ~ . + bi_pit_nohits_prop_zone29); summary(g26) ## p = NA
+g27 <- update(g, . ~ . + bi_pit_nohits_prop_zone30); summary(g27) ## p <2e-16
+```
+
+```{r include=FALSE}
+fit6 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + as.factor(wind_dir) + wind_speed + bi_bat_pitch_prop_zone5 + bi_bat_pitch_prop_zone8 +  bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone12 + bi_bat_swing_prop_zone22 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_bat_k_bb_prop_zone5 + bi_bat_k_bb_prop_zone12 + bi_bat_k_bb_prop_zone22 + bi_bat_ba_prop_zone23 + bi_pit_nohits_prop_zone12 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + bi_pit_swings_prop_zone22 + bi_pit_pitches_prop_zone1, family = binomial, data = grp6); summary(fit6); car::vif(fit6)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_car_pitch_prop_zone1); summary(g1) ## p = 0.421
+g2 <- update(g, . ~ . + mat_car_pitch_prop_zone2); summary(g2)## p = 2.14e-05
+g3 <- update(g, . ~ . + mat_car_pitch_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_car_pitch_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_car_pitch_prop_zone5); summary(g5)## p <2e-16
+g6 <- update(g, . ~ . + mat_car_pitch_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_car_pitch_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_car_pitch_prop_zone8); summary(g8)## p = 0.69
+g9 <- update(g, . ~ . + mat_car_pitch_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_car_pitch_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_car_pitch_prop_zone12); summary(g11)## p = 0.224
+g12 <- update(g, . ~ . + mat_car_pitch_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_car_pitch_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_car_pitch_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_car_pitch_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_car_pitch_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_car_pitch_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_car_pitch_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_car_pitch_prop_zone22); summary(g19)## p = 0.557 
+g20 <- update(g, . ~ . + mat_car_pitch_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_car_pitch_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_car_pitch_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_car_pitch_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_car_pitch_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_car_pitch_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_car_pitch_prop_zone30); summary(g26)## p = 0.531
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_car_swing_prop_zone1); summary(g1)## p = NA
+g2 <- update(g, . ~ . + mat_car_swing_prop_zone2); summary(g2)## p <2e-16
+g3 <- update(g, . ~ . + mat_car_swing_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_car_swing_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_car_swing_prop_zone5); summary(g5)## p = 0.0595
+g6 <- update(g, . ~ . + mat_car_swing_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_car_swing_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_car_swing_prop_zone8); summary(g8)## p = 0.000233
+g9 <- update(g, . ~ . + mat_car_swing_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_car_swing_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_car_swing_prop_zone12); summary(g11)## p <2e-16
+g12 <- update(g, . ~ . + mat_car_swing_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_car_swing_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_car_swing_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_car_swing_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_car_swing_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_car_swing_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_car_swing_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_car_swing_prop_zone22); summary(g19)## p = 0.37 
+g20 <- update(g, . ~ . + mat_car_swing_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_car_swing_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_car_swing_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_car_swing_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_car_swing_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_car_swing_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_car_swing_prop_zone30); summary(g26)## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_car_whiff_prop_zone1); summary(g1)## p = NA
+g2 <- update(g, . ~ . + mat_car_whiff_prop_zone2); summary(g2)## p = NA
+g3 <- update(g, . ~ . + mat_car_whiff_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_car_whiff_prop_zone4); summary(g4)## p =NA
+g5 <- update(g, . ~ . + mat_car_whiff_prop_zone5); summary(g5)## p <2e-16
+g6 <- update(g, . ~ . + mat_car_whiff_prop_zone6); summary(g6)## p =NA
+g7 <- update(g, . ~ . + mat_car_whiff_prop_zone7); summary(g7)## p =NA
+g8 <- update(g, . ~ . + mat_car_whiff_prop_zone8); summary(g8)## p = 0.0107
+g9 <- update(g, . ~ . + mat_car_whiff_prop_zone9); summary(g9)## p =NA
+g10 <- update(g, . ~ . + mat_car_whiff_prop_zone11); summary(g10)## p =NA
+g11 <- update(g, . ~ . + mat_car_whiff_prop_zone12); summary(g11)## p =NA
+g12 <- update(g, . ~ . + mat_car_whiff_prop_zone13); summary(g12)## p =NA
+g13 <- update(g, . ~ . + mat_car_whiff_prop_zone14); summary(g13)## p =NA
+g14 <- update(g, . ~ . + mat_car_whiff_prop_zone16); summary(g14)## p =NA
+g15 <- update(g, . ~ . + mat_car_whiff_prop_zone17); summary(g15)## p =NA
+g16 <- update(g, . ~ . + mat_car_whiff_prop_zone18); summary(g16)## p =NA
+g17 <- update(g, . ~ . + mat_car_whiff_prop_zone19); summary(g17)## p =NA
+g18 <- update(g, . ~ . + mat_car_whiff_prop_zone21); summary(g18)## p =NA
+g19 <- update(g, . ~ . + mat_car_whiff_prop_zone22); summary(g19)## p =NA
+g20 <- update(g, . ~ . + mat_car_whiff_prop_zone23); summary(g20)## p =NA
+g21 <- update(g, . ~ . + mat_car_whiff_prop_zone24); summary(g21)## p =NA
+g22 <- update(g, . ~ . + mat_car_whiff_prop_zone26); summary(g22)## p =NA
+g23 <- update(g, . ~ . + mat_car_whiff_prop_zone27); summary(g23)## p =NA
+g24 <- update(g, . ~ . + mat_car_whiff_prop_zone28); summary(g24)## p =NA
+g25 <- update(g, . ~ . + mat_car_whiff_prop_zone29); summary(g25)## p =NA
+g26 <- update(g, . ~ . + mat_car_whiff_prop_zone30); summary(g26)## p =NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_car_k_bb_prop_zone1); summary(g1)## p <2e-16
+g2 <- update(g, . ~ . + mat_car_k_bb_prop_zone2); summary(g2)## p <2e-16
+g3 <- update(g, . ~ . + mat_car_k_bb_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_car_k_bb_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_car_k_bb_prop_zone5); summary(g5)## p <2e-16
+g6 <- update(g, . ~ . + mat_car_k_bb_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_car_k_bb_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_car_k_bb_prop_zone8); summary(g8)## p = 0.2
+g9 <- update(g, . ~ . + mat_car_k_bb_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_car_k_bb_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_car_k_bb_prop_zone12); summary(g11)## p <2e-16
+g12 <- update(g, . ~ . + mat_car_k_bb_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_car_k_bb_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_car_k_bb_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_car_k_bb_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_car_k_bb_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_car_k_bb_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_car_k_bb_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_car_k_bb_prop_zone22); summary(g19)## p <2e-16
+g20 <- update(g, . ~ . + mat_car_k_bb_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_car_k_bb_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_car_k_bb_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_car_k_bb_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_car_k_bb_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_car_k_bb_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_car_k_bb_prop_zone30); summary(g26)## p = 0.0534
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_car_ba_prop_zone1); summary(g1)## p = 0.877
+g2 <- update(g, . ~ . + mat_car_ba_prop_zone2); summary(g2)## p <2e-16
+g3 <- update(g, . ~ . + mat_car_ba_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_car_ba_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_car_ba_prop_zone5); summary(g5)## p <2e-16
+g6 <- update(g, . ~ . + mat_car_ba_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_car_ba_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_car_ba_prop_zone8); summary(g8)## p = 0.000542 
+g9 <- update(g, . ~ . + mat_car_ba_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_car_ba_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_car_ba_prop_zone12); summary(g11)## p <2e-16
+g12 <- update(g, . ~ . + mat_car_ba_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_car_ba_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_car_ba_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_car_ba_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_car_ba_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_car_ba_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_car_ba_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_car_ba_prop_zone22); summary(g19)## p = 5.1e-15
+g20 <- update(g, . ~ . + mat_car_ba_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_car_ba_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_car_ba_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_car_ba_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_car_ba_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_car_ba_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_car_ba_prop_zone30); summary(g26)## p = 9.74e-05
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_bi_pitch_prop_zone1); summary(g1)## p = 0.0241
+g2 <- update(g, . ~ . + mat_bi_pitch_prop_zone2); summary(g2)## p <2e-16
+g3 <- update(g, . ~ . + mat_bi_pitch_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_bi_pitch_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_bi_pitch_prop_zone5); summary(g5)## p = 2.79e-16
+g6 <- update(g, . ~ . + mat_bi_pitch_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_bi_pitch_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_bi_pitch_prop_zone8); summary(g8)## p = 0.637
+g9 <- update(g, . ~ . + mat_bi_pitch_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_bi_pitch_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_bi_pitch_prop_zone12); summary(g11)## p = 0.545
+g12 <- update(g, . ~ . + mat_bi_pitch_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_bi_pitch_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_bi_pitch_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_bi_pitch_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_bi_pitch_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_bi_pitch_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_bi_pitch_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_bi_pitch_prop_zone22); summary(g19)## p <2e-16
+g20 <- update(g, . ~ . + mat_bi_pitch_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_bi_pitch_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_bi_pitch_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_bi_pitch_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_bi_pitch_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_bi_pitch_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_bi_pitch_prop_zone30); summary(g26)## p <2e-16
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_bi_swing_prop_zone1); summary(g1)## p = NA
+g2 <- update(g, . ~ . + mat_bi_swing_prop_zone2); summary(g2)## p <2e-16
+g3 <- update(g, . ~ . + mat_bi_swing_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_bi_swing_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_bi_swing_prop_zone5); summary(g5)## p = 0.0595
+g6 <- update(g, . ~ . + mat_bi_swing_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_bi_swing_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_bi_swing_prop_zone8); summary(g8)## p = 0.000233
+g9 <- update(g, . ~ . + mat_bi_swing_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_bi_swing_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_bi_swing_prop_zone12); summary(g11)## p <2e-16
+g12 <- update(g, . ~ . + mat_bi_swing_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_bi_swing_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_bi_swing_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_bi_swing_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_bi_swing_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_bi_swing_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_bi_swing_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_bi_swing_prop_zone22); summary(g19)## p = NA
+g20 <- update(g, . ~ . + mat_bi_swing_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_bi_swing_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_bi_swing_prop_zone26); summary(g22)## p = 0.37
+g23 <- update(g, . ~ . + mat_bi_swing_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_bi_swing_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_bi_swing_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_bi_swing_prop_zone30); summary(g26)## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_bi_whiff_prop_zone1); summary(g1)## p = NA
+g2 <- update(g, . ~ . + mat_bi_whiff_prop_zone2); summary(g2)## p = NA
+g3 <- update(g, . ~ . + mat_bi_whiff_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_bi_whiff_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_bi_whiff_prop_zone5); summary(g5)## p <2e-16
+g6 <- update(g, . ~ . + mat_bi_whiff_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_bi_whiff_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_bi_whiff_prop_zone8); summary(g8)## p = 0.0107
+g9 <- update(g, . ~ . + mat_bi_whiff_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_bi_whiff_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_bi_whiff_prop_zone12); summary(g11)## p = NA
+g12 <- update(g, . ~ . + mat_bi_whiff_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_bi_whiff_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_bi_whiff_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_bi_whiff_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_bi_whiff_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_bi_whiff_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_bi_whiff_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_bi_whiff_prop_zone22); summary(g19)## p = NA
+g20 <- update(g, . ~ . + mat_bi_whiff_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_bi_whiff_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_bi_whiff_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_bi_whiff_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_bi_whiff_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_bi_whiff_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_bi_whiff_prop_zone30); summary(g26)## p = NA
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_bi_k_bb_prop_zone1); summary(g1)## p <2e-16
+g2 <- update(g, . ~ . + mat_bi_k_bb_prop_zone2); summary(g2)## p <2e-16
+g3 <- update(g, . ~ . + mat_bi_k_bb_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_bi_k_bb_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_bi_k_bb_prop_zone5); summary(g5)## p <2e-16
+g6 <- update(g, . ~ . + mat_bi_k_bb_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_bi_k_bb_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_bi_k_bb_prop_zone8); summary(g8)## p = 0.2
+g9 <- update(g, . ~ . + mat_bi_k_bb_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_bi_k_bb_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_bi_k_bb_prop_zone12); summary(g11)## p <2e-16
+g12 <- update(g, . ~ . + mat_bi_k_bb_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_bi_k_bb_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_bi_k_bb_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_bi_k_bb_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_bi_k_bb_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_bi_k_bb_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_bi_k_bb_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_bi_k_bb_prop_zone22); summary(g19)## p <2e-16
+g20 <- update(g, . ~ . + mat_bi_k_bb_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_bi_k_bb_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_bi_k_bb_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_bi_k_bb_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_bi_k_bb_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_bi_k_bb_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_bi_k_bb_prop_zone30); summary(g26)## p = 0.0534
+```
+
+```{r eval=FALSE, include=FALSE}
+## grp7
+g <- glm(bb_type ~ 1, family = binomial, data = grp7)
+g1 <- update(g, . ~ . + mat_bi_ba_prop_zone1); summary(g1)## p = NA
+g2 <- update(g, . ~ . + mat_bi_ba_prop_zone2); summary(g2)## p = 0.771
+g3 <- update(g, . ~ . + mat_bi_ba_prop_zone3); summary(g3)## p = NA
+g4 <- update(g, . ~ . + mat_bi_ba_prop_zone4); summary(g4)## p = NA
+g5 <- update(g, . ~ . + mat_bi_ba_prop_zone5); summary(g5)## p = 0.854
+g6 <- update(g, . ~ . + mat_bi_ba_prop_zone6); summary(g6)## p = NA
+g7 <- update(g, . ~ . + mat_bi_ba_prop_zone7); summary(g7)## p = NA
+g8 <- update(g, . ~ . + mat_bi_ba_prop_zone8); summary(g8)## p = 0.727
+g9 <- update(g, . ~ . + mat_bi_ba_prop_zone9); summary(g9)## p = NA
+g10 <- update(g, . ~ . + mat_bi_ba_prop_zone11); summary(g10)## p = NA
+g11 <- update(g, . ~ . + mat_bi_ba_prop_zone12); summary(g11)## p = 0.801
+g12 <- update(g, . ~ . + mat_bi_ba_prop_zone13); summary(g12)## p = NA
+g13 <- update(g, . ~ . + mat_bi_ba_prop_zone14); summary(g13)## p = NA
+g14 <- update(g, . ~ . + mat_bi_ba_prop_zone16); summary(g14)## p = NA
+g15 <- update(g, . ~ . + mat_bi_ba_prop_zone17); summary(g15)## p = NA
+g16 <- update(g, . ~ . + mat_bi_ba_prop_zone18); summary(g16)## p = NA
+g17 <- update(g, . ~ . + mat_bi_ba_prop_zone19); summary(g17)## p = NA
+g18 <- update(g, . ~ . + mat_bi_ba_prop_zone21); summary(g18)## p = NA
+g19 <- update(g, . ~ . + mat_bi_ba_prop_zone22); summary(g19)## p = 0.636
+g20 <- update(g, . ~ . + mat_bi_ba_prop_zone23); summary(g20)## p = NA
+g21 <- update(g, . ~ . + mat_bi_ba_prop_zone24); summary(g21)## p = NA
+g22 <- update(g, . ~ . + mat_bi_ba_prop_zone26); summary(g22)## p = NA
+g23 <- update(g, . ~ . + mat_bi_ba_prop_zone27); summary(g23)## p = NA
+g24 <- update(g, . ~ . + mat_bi_ba_prop_zone28); summary(g24)## p = NA
+g25 <- update(g, . ~ . + mat_bi_ba_prop_zone29); summary(g25)## p = NA
+g26 <- update(g, . ~ . + mat_bi_ba_prop_zone30); summary(g26)## p = 0.503
+```
+
+```{r include=FALSE}
+fit7 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + mat_bi_k_bb_prop_zone1 + mat_bi_k_bb_prop_zone2 + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_bi_swing_prop_zone2 + mat_bi_swing_prop_zone12 + mat_bi_pitch_prop_zone30 + mat_car_ba_prop_zone12, family = binomial, data = grp7); summary(fit7); car::vif(fit7)
+```
+
+```{r include=FALSE}
+full8 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_car_ba_prop_zone12 + bi_bat_pitch_prop_zone5 + bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + Biseason_bat_H  + Biseason_bat_BB + Car_bat_Whiffs + Car_pit_H, family = binomial, data = grp8); summary(full8); car::vif(full8)
+```
+
+```{r include=FALSE}
+full9 <- glm(bb_type ~ vert_adj + release_spin_rate + horiz_adj + pfx_z + pfx_x + as.factor(stand) + temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_car_ba_prop_zone12 + bi_bat_pitch_prop_zone5 + bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + Biseason_bat_BB + Biseason_bat_H + Car_pit_H, family = binomial, data = grp9); summary(full9); car::vif(full9)
+```
+
+Checking for the linearity of the predictors showed that the predictors in every model were generally linear. Checking for unusual points using Cook's distance and standardized residuals shows several unusual points for each model, but the points seemed realistic and the dataset is already so large and corrupted that it didn't seem like removing the points had much influence on the models.
+
+```{r eval=FALSE, include=FALSE}
+## Check linearity
+
+## Resample and refit model 1 for smaller subset of data
+a <- grp1[sample(nrow(grp1), 1000), ]
+
+fit1 <- glm(bb_type ~ vert_adj + release_spin_rate + horiz_adj + pfx_z + pfx_x + as.factor(stand) + as.factor(p_throws), family = binomial, data = a)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(fit1, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- a %>%
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 2 for smaller subset of data
+b <- grp2[sample(nrow(grp2), 1000), ]
+
+fit2 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + wind_speed, family = binomial, data = b)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(fit2, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- b %>%
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 3 for smaller subset of data
+c <- grp3[sample(nrow(grp3), 1000), ]
+
+fit3 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + Car_bat_H + Car_pit_H + Car_pit_G, family = binomial, data = c)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(fit3, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- c %>%
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 4 for smaller subset of data
+d <- grp4[sample(nrow(grp4), 1000), ]
+
+fit4 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + wind_speed + Biseason_bat_H + Biseason_bat_BB + Biseason_pit_H + Biseason_pit_G + Biseason_pit_K + biseason_pit_FIP, family = binomial, data = d)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(fit4, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- d %>%
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 5 for smaller subset of data
+e <- grp5[sample(nrow(grp5), 1000), ]
+
+fit5 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + as.factor(wind_dir) + wind_speed + car_pit_nohits_prop_zone30 + car_pit_nohits_prop_zone12 + car_pit_hits_prop_zone12 + car_pit_hits_prop_zone5 + car_pit_hits_prop_zone2 +  car_pit_swings_prop_zone22 + car_bat_k_bb_prop_zone2 + car_bat_k_bb_prop_zone5 + car_bat_k_bb_prop_zone12 + car_bat_k_bb_prop_zone22 + car_bat_swing_prop_zone30 + car_bat_pitch_prop_zone5, family = binomial, data = e)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(fit5, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- e %>%
+  dplyr::select(temperature, stand, p_throws, balls, strikes, birth_year, wind_dir, wind_speed, car_pit_nohits_prop_zone30, car_pit_nohits_prop_zone12, car_pit_hits_prop_zone12, car_pit_hits_prop_zone5, car_pit_hits_prop_zone2,  car_pit_swings_prop_zone22, car_bat_k_bb_prop_zone2, car_bat_k_bb_prop_zone5, car_bat_k_bb_prop_zone12, car_bat_k_bb_prop_zone22, car_bat_swing_prop_zone30, car_bat_pitch_prop_zone5) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 6 for smaller subset of data
+f <- grp6[sample(nrow(grp6), 1000), ]
+
+fit6 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + as.factor(wind_dir) + wind_speed + bi_bat_pitch_prop_zone5 + bi_bat_pitch_prop_zone8 +  bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone12 + bi_bat_swing_prop_zone22 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_bat_k_bb_prop_zone5 + bi_bat_k_bb_prop_zone12 + bi_bat_k_bb_prop_zone22 + bi_bat_ba_prop_zone23 + bi_pit_nohits_prop_zone12 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + bi_pit_swings_prop_zone22 + bi_pit_pitches_prop_zone1, family = binomial, data = f)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(fit6, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- f %>%
+  dplyr::select(bi_bat_pitch_prop_zone5, bi_bat_pitch_prop_zone8,  bi_bat_whiff_prop_zone2, bi_bat_swing_prop_zone2, bi_bat_swing_prop_zone12, bi_bat_swing_prop_zone22, bi_bat_swing_prop_zone30, bi_bat_k_bb_prop_zone1, bi_bat_k_bb_prop_zone2, bi_bat_k_bb_prop_zone5, bi_bat_k_bb_prop_zone12, bi_bat_k_bb_prop_zone22, bi_bat_ba_prop_zone23, bi_pit_nohits_prop_zone12, bi_pit_hits_prop_zone2, bi_pit_hits_prop_zone5, bi_pit_hits_prop_zone12, bi_pit_swings_prop_zone22, bi_pit_pitches_prop_zone1) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 7 for smaller subset of data
+g <- grp7[sample(nrow(grp7), 1000), ]
+
+fit7 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + mat_bi_k_bb_prop_zone1 + mat_bi_k_bb_prop_zone2 + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_bi_swing_prop_zone2 + mat_bi_swing_prop_zone12 + mat_bi_pitch_prop_zone30 + mat_car_ba_prop_zone12, family = binomial, data = g)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(fit7, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- g %>%
+  dplyr::select(mat_bi_k_bb_prop_zone1, mat_bi_k_bb_prop_zone2, mat_bi_k_bb_prop_zone5, mat_bi_k_bb_prop_zone12, mat_bi_k_bb_prop_zone22, mat_bi_swing_prop_zone2, mat_bi_swing_prop_zone12, mat_bi_pitch_prop_zone30, mat_car_ba_prop_zone12) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 8 for smaller subset of data
+h <- grp8[sample(nrow(grp8), 1000), ]
+
+full8 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_car_ba_prop_zone12 + bi_bat_pitch_prop_zone5 + bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + Biseason_bat_H  + Biseason_bat_BB + Car_bat_Whiffs + Car_pit_H, family = binomial, data = h)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(full8, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- h %>%
+  dplyr::select(mat_bi_k_bb_prop_zone5, mat_bi_k_bb_prop_zone12, mat_bi_k_bb_prop_zone22, mat_car_ba_prop_zone12, bi_bat_pitch_prop_zone5, bi_bat_whiff_prop_zone2, bi_bat_swing_prop_zone2, bi_bat_swing_prop_zone30, bi_bat_k_bb_prop_zone1, bi_bat_k_bb_prop_zone2, bi_pit_hits_prop_zone2, bi_pit_hits_prop_zone5, bi_pit_hits_prop_zone12, Biseason_bat_H, Biseason_bat_BB, Car_bat_Whiffs, Car_pit_H) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Resample and refit model 9 for smaller subset of data
+i <- grp9[sample(nrow(grp9), 1000), ]
+
+full9 <- glm(bb_type ~ vert_adj + release_spin_rate + horiz_adj + pfx_z + pfx_x + as.factor(stand) + temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_car_ba_prop_zone12 + bi_bat_pitch_prop_zone5 + bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + Biseason_bat_BB + Biseason_bat_H + Car_pit_H, family = binomial, data = i)
+
+# Predict the probability (p) of bb_type = 1
+probabilities <- predict(full9, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "pos", "neg")
+
+# Select only numeric predictors
+mydata <- i %>%
+  dplyr::select(vert_adj, release_spin_rate, horiz_adj, pfx_z, pfx_x, stand, temperature, p_throws, balls, strikes, wind_dir, mat_bi_k_bb_prop_zone5, mat_bi_k_bb_prop_zone12, mat_bi_k_bb_prop_zone22, mat_car_ba_prop_zone12, bi_bat_pitch_prop_zone5, bi_bat_whiff_prop_zone2, bi_bat_swing_prop_zone2, bi_bat_swing_prop_zone30, bi_bat_k_bb_prop_zone1, bi_bat_k_bb_prop_zone2, bi_pit_hits_prop_zone2, bi_pit_hits_prop_zone5, bi_pit_hits_prop_zone12, Biseason_bat_BB, Biseason_bat_H, Car_pit_H) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(mydata, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+```{r eval=FALSE, include=FALSE}
+## Influential Points
+
+## Model 1
+fit1 <- glm(bb_type ~ vert_adj + release_spin_rate + horiz_adj + pfx_z + pfx_x + as.factor(stand) + as.factor(p_throws), family = binomial, data = grp1)
+
+plot(fit1, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(fit1) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+```{r eval=FALSE, include=FALSE}
+## Model 2
+fit2 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + wind_speed, family = binomial, data = grp2)
+
+plot(fit2, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(fit2) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 3
+fit3 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + Car_bat_H + Car_pit_H + Car_pit_G, family = binomial, data = grp3)
+
+plot(fit3, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(fit3) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 4
+fit4 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + wind_speed + Biseason_bat_H + Biseason_bat_BB + Biseason_pit_H + Biseason_pit_G + Biseason_pit_K + biseason_pit_FIP, family = binomial, data = grp4)
+
+plot(fit4, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(fit4) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 5
+fit5 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + as.factor(wind_dir) + wind_speed + car_pit_nohits_prop_zone30 + car_pit_nohits_prop_zone12 + car_pit_hits_prop_zone12 + car_pit_hits_prop_zone5 + car_pit_hits_prop_zone2 +  car_pit_swings_prop_zone22 + car_bat_k_bb_prop_zone2 + car_bat_k_bb_prop_zone5 + car_bat_k_bb_prop_zone12 + car_bat_k_bb_prop_zone22 + car_bat_swing_prop_zone30 + car_bat_pitch_prop_zone5, family = binomial, data = grp5)
+
+plot(fit5, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(fit5) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 6
+fit6 <- glm(bb_type ~ temperature + as.factor(stand) + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + as.factor(wind_dir) + wind_speed + bi_bat_pitch_prop_zone5 + bi_bat_pitch_prop_zone8 +  bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone12 + bi_bat_swing_prop_zone22 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_bat_k_bb_prop_zone5 + bi_bat_k_bb_prop_zone12 + bi_bat_k_bb_prop_zone22 + bi_bat_ba_prop_zone23 + bi_pit_nohits_prop_zone12 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + bi_pit_swings_prop_zone22 + bi_pit_pitches_prop_zone1, family = binomial, data = grp6)
+
+plot(fit6, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(fit6) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 7
+fit7 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + birth_year + pit_birth_year + as.factor(wind_dir) + mat_bi_k_bb_prop_zone1 + mat_bi_k_bb_prop_zone2 + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_bi_swing_prop_zone2 + mat_bi_swing_prop_zone12 + mat_bi_pitch_prop_zone30 + mat_car_ba_prop_zone12, family = binomial, data = grp7)
+
+plot(fit7, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(fit7) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 8
+full8 <- glm(bb_type ~ temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_car_ba_prop_zone12 + bi_bat_pitch_prop_zone5 + bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + Biseason_bat_H  + Biseason_bat_BB + Car_bat_Whiffs + Car_pit_H, family = binomial, data = grp8)
+
+plot(full8, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(full8) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 9
+full9 <- glm(bb_type ~ vert_adj + release_spin_rate + horiz_adj + pfx_z + pfx_x + as.factor(stand) + temperature + as.factor(p_throws) + as.factor(balls) + as.factor(strikes) + as.factor(wind_dir) + mat_bi_k_bb_prop_zone5 + mat_bi_k_bb_prop_zone12 + mat_bi_k_bb_prop_zone22 + mat_car_ba_prop_zone12 + bi_bat_pitch_prop_zone5 + bi_bat_whiff_prop_zone2 + bi_bat_swing_prop_zone2 + bi_bat_swing_prop_zone30 + bi_bat_k_bb_prop_zone1 + bi_bat_k_bb_prop_zone2 + bi_pit_hits_prop_zone2 + bi_pit_hits_prop_zone5 + bi_pit_hits_prop_zone12 + Biseason_bat_BB + Biseason_bat_H + Car_pit_H, family = binomial, data = grp9)
+
+plot(full9, which = 4, id.n = 3)
+
+# Extract model results
+model.data <- augment(full9) %>% 
+  mutate(index = 1:n()) 
+
+# Top 3 Cook's distance
+model.data %>% top_n(3, .cooksd)
+
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = as.factor(bb_type)), alpha = .5) +
+  theme_bw()
+
+# Influential points
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+###RESULTS
+
+Here are the final models with a list of their variables, coefficients, the standard error for each coefficient, the z-statistic from the Wald-test for each coefficient, and the p-values for those Wald-tests. The confidence intervals for the coefficients of each model are also included underneath each model:
+
+
+Model 1:
+
+```{r echo=FALSE}
+kable(tidy(fit1)[1:8, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(fit1)[1:8,])
+```
+
+
+Model 2:
+
+```{r echo=FALSE}
+kable(tidy(fit2)[1:22, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(fit2)[1:22,])
+```
+
+
+Model 3:
+
+```{r echo=FALSE}
+kable(tidy(fit3)[1:24, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(fit3)[1:24,])
+```
+
+
+Model 4:
+
+```{r echo=FALSE}
+kable(tidy(fit4)[1:25, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(fit4)[1:25,])
+```
+
+
+Model 5:
+
+```{r echo=FALSE}
+kable(tidy(fit5)[1:32, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(fit5)[1:32,])
+```
+
+
+Model 6:
+
+```{r echo=FALSE}
+kable(tidy(fit6)[1:39, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(fit6)[1:39,])
+```
+
+
+Model 7:
+
+```{r echo=FALSE}
+kable(tidy(fit7)[1:28, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(fit7)[1:28,])
+```
+
+
+Model 8:
+
+```{r echo=FALSE}
+kable(tidy(full8)[1:34, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(full8)[1:34,])
+```
+
+
+Model 9:
+
+```{r echo=FALSE}
+kable(tidy(full9)[1:40, 1:5])
+```
+
+```{r echo=FALSE}
+kable(confint(full9)[1:40,])
+```
+
+
+$stand_1 = 1$ for a left handed hitter and $stand_1 = 0$ for a right handed hitter. $p.throws_1 = 1$ for a left handed pitcher and $p.throws_1=0$ for a right handed pitcher. $wind.dir_1 = 1$ if there is no wind, $wind.dir_2 = 2$ if the wind is "calm," $wind.dir_3 = 3$ if the wind direction varies, $wind.dir_4 = 4$ if the wind is blowing out to center field, $wind.dir_5 = 5$ if the wind is blowing from right field to left field, $wind.dir_6 = 6$ if the wind is blowing out to right field, $wind.dir_7 = 7$ if the wind is blowing out to left field, $wind.dir_9 = 9$ if the wind is blowing in from left field, $wind.dir_10 = 10$ if the wind is blowing in from center field, and $wind.dir_11 = 11$ if the wind is blowing in from right field, and the baseline is the field is indoors. Each *balls* and *strikes* dummy variable is coded as the respective number (e.g. $balls_2 = 2$ and $strikes_2 = 2$). For the interpretation of other variables, see the codebook.
+
+According to Hosmer-Lemeshow tests, all of the models have very poor calibration. The first model was the worst calibrated. Models one, two, three, four, and nine were all the poorest calibrated with $P<2.2e-16$. The next worst calibrated model was the fifth, with $P=1.089e-13$, then the eighth model with $P=1.158e-10$. The best two calibrated models were the sixth and seventh, with $P=0.0005795$ and $P=8.867e-7$ respectively. 
+
+
+```{r eval=FALSE, include=FALSE}
+## H-L Tests
+
+##Model 1
+logitgof(grp1$bb_type, fitted(fit1))
+## Model 2
+logitgof(grp2$bb_type, fitted(fit2))
+## Model 3
+logitgof(grp3$bb_type, fitted(fit3))
+## Model 4
+logitgof(grp4$bb_type, fitted(fit4))
+## Model 5
+logitgof(grp5$bb_type, fitted(fit5))
+## Model 6
+logitgof(grp6$bb_type, fitted(fit6))
+## Model 7
+logitgof(grp7$bb_type, fitted(fit7))
+## Model 8
+logitgof(grp8$bb_type, fitted(full8))
+## Model 9
+logitgof(grp9$bb_type, fitted(full9))
+```
+
+The best concordance-index among the models was $C=0.6467$ for the sixth model. Interestingly, the next best c-index, for the fifth model, was $C=0.6403$, despite its poor concordance. In descending order of discrimination, the other c-indeces were $C=0.6392$ for the eighth model, $C=0.6347$ for the ninth model, $C=0.6314$ for the seventh model, $C=0.6152$ for the fourth model, $C=0.6031$ for the third model, $C=0.6003$ for the second model, and $C=0.5555$ for the first model. This means that, overall, the sixth and seventh models were the best performers, followed then by the eighth model.
+
+```{r eval=FALSE, include=FALSE}
+## C-indeces
+
+## Model 1
+auc(roccurve_1)
+## Model 2
+auc(roccurve_2)
+## Model 3
+auc(roccurve_3)
+## Model 4
+auc(roccurve_4)
+## Model 5
+auc(roccurve_5)
+## Model 6
+auc(roccurve_6)
+## Model 7
+auc(roccurve_7)
+## Model 8
+auc(roccurve_8)
+## Model 9
+auc(roccurve_9)
+```
+
+
+To demonstrate, below is the ROC curve for the worst performer, the first model:
+
+```{r echo=FALSE}
+## Model 1
+predpr <- predict(fit1,type=c("response"))
+roccurve_1 <- roc(grp1$bb_type ~ predpr)
+plot(roccurve_1)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+## Model 3
+predpr <- predict(fit3,type=c("response"))
+roccurve_3 <- roc(data$bb_type ~ predpr)
+plot(roccurve_3)
+```
+
+```{r eval=FALSE, include=FALSE}
+## Model 4
+predpr <- predict(fit4,type=c("response"))
+roccurve_4 <- roc(grp4$bb_type ~ predpr)
+plot(roccurve_4)
+```
+
+```{r eval=FALSE, include=FALSE}
+## Model 5
+predpr <- predict(fit5,type=c("response"))
+roccurve_5 <- roc(grp5$bb_type ~ predpr)
+plot(roccurve_5)
+```
+
+and the ROC curve for the best performers, the sixth model: 
+
+```{r echo=FALSE}
+## Model 6
+predpr <- predict(fit6,type=c("response"))
+roccurve_6 <- roc(grp6$bb_type ~ predpr)
+plot(roccurve_6)
+```
+
+the seventh model: 
+
+```{r echo=FALSE}
+## Model 7
+predpr <- predict(fit7,type=c("response"))
+roccurve_7 <- roc(grp7$bb_type ~ predpr)
+plot(roccurve_7)
+```
+
+```{r eval=FALSE, include=FALSE}
+## Model 2
+predpr <- predict(fit2,type=c("response"))
+roccurve_2 <- roc(grp2$bb_type ~ predpr)
+plot(roccurve_2)
+```
+
+and the eighth model: 
+
+```{r echo=FALSE}
+## Model 8
+predpr <- predict(full8,type=c("response"))
+roccurve_8 <- roc(grp8$bb_type ~ predpr)
+plot(roccurve_8)
+```
+
+```{r eval=FALSE, include=FALSE}
+## Model 9
+predpr <- predict(full9,type=c("response"))
+roccurve_9 <- roc(grp9$bb_type ~ predpr)
+plot(roccurve_9)
+```
+
+Because they were the best performers, the sixth, seventh, and eighth models are of greatest interest. However, because it utilized all variable categories and was theorized to be the best model, we will focus on the Model 8.
+
+According to this model, after adjusting for all other variables in the model pitcher throwing arm, number of balls in the count, number of strikes in the count, wind direction, and zone specified and general statistics, a one farenheit increase in temperature is associated with an average 1.00015 [95% CI, 0.997, 1.003] times increase in a batter's odds of not hitting the ball into fair territory. After adjusting for all other variables in the model, the pitcher being left handed (versus right handed) is associated with an average 0.85 [95% CI, 0.782, 0.905] factor decrease in a batter's odds of not hitting the ball into fair territory. After adjusting for all other variables in the model, having one ball in the count (versus none) is associated with an average 1.36 [95% CI, 1.276, 1.459] times increase in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, having two balls in the count (versus none) is associated with an average 1.69 [95% CI, 1.563, 1.822] times increase in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, having three balls in the count (versus none) is associated with an average 1.70 [95% CI, 1.546, 1.872] times increase in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, having one strike in the count (versus none) is associated with an average 1.58 [95% CI, 1.477, 1.691] times increase in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, having two strikes in the count (versus none) is associated with an average 1.79 [95% CI, 1.664, 1.917] times increase in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, a one hit increase in 2017 through 2018 for the batter is associated with an average 1.0005 [95% CI, 1.000, 1.001] times increase in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, a one walk increase in 2017 through 2018 for the batter is associated with an average 0.99 [95% CI, 0.996, 0.999] factor decrease in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, a one whiff increase in the batter's career is associated with an average 0.99 [95% CI, 0.9990, 0.9999] factor decrease in the odds of the batter hitting the ball into fair territory. After adjusting for all other variables in the model, a one hit increase against the pitcher in his career is associated with an average 0.99 [95% CI, 0.9996, 1.000018] factor decrease in the odds of the batter hitting the ball into fair territory. For efficiency, I will not interpret the coefficients for wind direction.
+
+A 0.100 point increase in the matchup-specific strikes-plus-balls in zone 5 over 2017 through 2018 proportional to all pitches thrown or received over the same period is associated with a 0.05 [95% CI, 0.002, 1.292] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the matchup-specific strikes-plus-balls in zone 12 over 2017 through 2018 proportional to all pitches thrown or received over the same period is associated with a 0.04 [95% CI, 0.009, 0.204] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the matchup-specific strikes-plus-balls in zone 22 over 2017 through 2018 proportional to all pitches thrown or received over the same period is associated with a 6.2e-06 [95% CI, 9.809e-09, 0.004] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the matchup-specific batting average proportional to pitches thrown or received over the respective players' entire careers (since 2008) is associated with a 0.99 [95% CI, 0.986, 1.003] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the proportion of whiffs by the batter in zone 2 over 2017 through 2018 out of all the pitches received by them in that same period is associated with a 0.00029 [95% CI, 9.941e-07, 0.078] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the proportion of pitches received by the batter in zone 5 over 2017 through 2018 out of all the pitches received by them in that same period is associated with a 0.97 [95% CI, 0.814, 1.142] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the proportion of swings by the batter in zone 2 over 2017 through 2018 out of all the pitches received by them in that same period is associated with a 0.97 [95% CI, 0.852, 1.063] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the proportion of swings by the batter in zone 30 over 2017 through 2018 out of all the pitches received by them in that same period is associated with a 0.085 [95% CI, 4.267e-04, 0.142] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the strikes-plus-balls received by the batter in zone 1 over 2017 through 2018 proportional to all pitches received by the batter over the same period is associated with a 1.05e53 [95% CI, 6.036e+11, 1.293e+93] times increase in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the strikes-plus-balls recieved by the batter in zone 2 over 2017 through 2018 proportional to all pitches received by him over the same period is associated with a 0.48 [95% CI, 0.317, 0.723] factor decrease in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the hits by the batter in zone 2 over 2017 through 2018 proportional to all pitches received by him over the same period is associated with a 1.80 [95% CI, 1.580, 2.069] times increase in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the hits by the batter in zone 5 over 2017 through 2018 proportional to all pitches received by him over the same period is associated with a 4.47 [95% CI, 2.423, 8.182] times increase in the odds of the batter hitting the ball into fair territory. A 0.100 point increase in the hits by the batter in zone 12 over 2017 through 2018 proportional to all pitches received by him over the same period is associated with a 1.92 [95% CI, 1.674, 2.183] times increase in the odds of the batter hitting the ball into fair territory.  
+
+
+###DISCUSSION
+
+There should be repeated emphasis that the results of this study are only generalizeable to this sepcific data set because of its corruption. Because logistic regressions were used despite the independence assumption violation in addition to the fact that the data corruption is likely not random, the accuracy of any of the results is quite dubious. Furthermore, because the models were created rather subjectively, they are possibly overfit and/or do not contain the most significant predictors.
+
+Still, it is interesting to see that, as was hypothesized models two through eight became roughly more accurate from one to the next. Potentially even more interesting is that models six and seven were most accurate. Model six involved zone statistics over 2017 through 2018, and model seven involved matchup-specific zone statistics. This not only shows that the differentiation of player statistics by sections of the strike zone could help to make even more accurate predictions of pitch outcomes than currently exist, but that player volatility is a huge factor in pitch outcomes. In other words, more recent statistics about a batter or pitcher's playing will be more accurate than statistics over their entire careers. In addition, the effect of strength and weakness areas for batters and pitchers in the strike zone has also been shown to be best emphasized by multiplying the statistics for the respective batter and pitcher.
+
+Because of the innacuracy of the data and the specificity of some of the variables, extended comments on the results are not really worth the time. According to baseball common knowledge, it makes sense that higher temperatures make hitting more likely and left handed pitchers make hitting less likely. However, the fact that an increase in the proportion of pitches thrown into zone 5 by the pitcher and received by the batter in their respective 2017 through 2018 seasons, for example, is much harder to conceptualize. Yet this doesn't mean much since the goal is simply to predict pitch outcomes as accurately as possible.
+
+Even for this data, all of the models perform rather badly, only slightly better than chance at discrimination but all rather poorly calibrated at the $\alpha = 0.05$ level. It's hard to know what this actualy means in reality though because of the issues with the data.
+
+Overall, the results seem to point that zone differentiation for statistics, multiplying the zone statistics for the respective batter and pitcher, and limiting how many past games statistics take into account might be helpful in future studies. It might also be helpful to create a variable for a batter and pitcher's respective strength and weakness zones for each statistic. It will also be potentially helpful to create a variable to replace whiffs for swing and misses at any pitch (because whiffs are swinging third strikes). Further studies should also try using random intercept logistic regressions to account for the indendence violation, using batter or pitcher (or both) as a second level. Despite this study's extreme limitations, it shows a lot of areas for new kinds of improvement in future work.
+
+
+###CONCLUSION
+
+The results of the study show that zone specifications for statistics are potentially significant ways to increase accuracy of pitch outcome prediction. The sixth and seventh models, which used zone specified statistics for batters and pitcher over 2017 through 2018, and matchup-specific zone specified statistics, respectively, had the best calibration, with $P=0.0005795$ and $P=8.867e-7$ from Hosmer-Lemeshow tests, respectively, and two of the best discrimination abilities, with $C=0.6314$ for the seventh model and $C=0.6467$ for the sixth model. This is especially significant compared to the first few models that used much more general (or external) variables and all failed to have as much predictive ability. Suprisingly, the eighth model, which utilized all categories of predictors, did not perform quite as well as the above two, but this might just be because of the process that created it and not becuase it *can't* improve. 
+
+This study faced many limitations. The results of this study are only generalizeable to this sepcific data set because of its corruption. Because logistic regressions were used despite the independence assumption violation in addition to the fact that the data corruption is likely not random, the accuracy of any of the results is quite dubious. Furthermore, because the models were created rather subjectively, they are possibly overfit and/or do not contain the most significant predictors. Still, this study made significant steps in pointing towards evermore accurate ways to predict pitch outcomes.
+
+
+###APPENDIX
+
+Variables in consideration for Model 1:
+```{r echo=FALSE}
+kable(names(grp1))
+```
+
+
+Variables in consideration for Model 2:
+```{r echo=FALSE}
+kable(names(grp2))
+```
+
+
+Variables in consideration for Model 3:
+```{r echo=FALSE}
+kable(names(grp3))
+```
+
+
+Variables in consideration for Model 4:
+```{r echo=FALSE}
+kable(names(grp4))
+```
+
+
+Variables in consideration for Model 5:
+```{r echo=FALSE}
+kable(names(grp5))
+```
+
+
+Variables in consideration for Model 6:
+```{r echo=FALSE}
+kable(names(grp6))
+```
+
+
+Variables in consideration for Model 7:
+```{r echo=FALSE}
+kable(names(grp7))
+```
+
+
+Variables in consideration for Model 8:
+```{r echo=FALSE}
+kable(names(grp8))
+```
+
+
+Variables in consideration for Model 9:
+```{r echo=FALSE}
+kable(names(grp9))
+```
+
+
+
+
+
+
